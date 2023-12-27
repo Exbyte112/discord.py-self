@@ -25,6 +25,7 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 from typing import Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union, TYPE_CHECKING
+from datetime import datetime
 import asyncio
 import array
 import copy
@@ -43,7 +44,7 @@ __all__ = (
 )
 
 if TYPE_CHECKING:
-    from datetime import date, datetime
+    from datetime import datetime
     from typing_extensions import Self
 
     from .types.threads import (
@@ -59,7 +60,6 @@ if TYPE_CHECKING:
     from .abc import Snowflake, SnowflakeTime
     from .role import Role
     from .state import ConnectionState
-    from .read_state import ReadState
 
 
 class Thread(Messageable, Hashable):
@@ -119,7 +119,7 @@ class Thread(Messageable, Hashable):
         Whether non-moderators can add other non-moderators to this thread.
         This is always ``True`` for public threads.
     auto_archive_duration: :class:`int`
-        The duration in minutes until the thread is automatically hidden from the channel list.
+        The duration in minutes until the thread is automatically archived due to inactivity.
         Usually a value of 60, 1440, 4320 and 10080.
     archive_timestamp: :class:`datetime.datetime`
         An aware timestamp of when the thread's archived status was last updated in UTC.
@@ -292,14 +292,6 @@ class Thread(Messageable, Hashable):
         return tags
 
     @property
-    def read_state(self) -> ReadState:
-        """:class:`ReadState`: Returns the read state for this channel.
-
-        .. versionadded:: 2.1
-        """
-        return self._state.get_read_state(self.id)
-
-    @property
     def starter_message(self) -> Optional[Message]:
         """Returns the thread starter message from the cache.
 
@@ -334,69 +326,6 @@ class Thread(Messageable, Hashable):
             The last message in this channel or ``None`` if not found.
         """
         return self._state._get_message(self.last_message_id) if self.last_message_id else None
-
-    @property
-    def acked_message_id(self) -> int:
-        """:class:`int`: The last message ID that the user has acknowledged.
-        It may *not* point to an existing or valid message.
-
-        .. versionadded:: 2.1
-        """
-        return self.read_state.last_acked_id
-
-    @property
-    def acked_message(self) -> Optional[Message]:
-        """Retrieves the last message that the user has acknowledged in cache.
-
-        The message might not be valid or point to an existing message.
-
-        .. versionadded:: 2.1
-
-        .. admonition:: Reliable Fetching
-            :class: helpful
-
-            For a slightly more reliable method of fetching the
-            last acknowledged message, consider using either :meth:`history`
-            or :meth:`fetch_message` with the :attr:`acked_message_id`
-            attribute.
-
-        Returns
-        ---------
-        Optional[:class:`Message`]
-            The last acknowledged message in this channel or ``None`` if not found.
-        """
-        acked_message_id = self.acked_message_id
-        if acked_message_id is None:
-            return
-
-        # We need to check if the message is in the same channel
-        message = self._state._get_message(acked_message_id)
-        if message and message.channel.id == self.id:
-            return message
-
-    @property
-    def acked_pin_timestamp(self) -> Optional[datetime]:
-        """Optional[:class:`datetime.datetime`]: When the channel's pins were last acknowledged.
-
-        .. versionadded:: 2.1
-        """
-        return self.read_state.last_pin_timestamp
-
-    @property
-    def mention_count(self) -> int:
-        """:class:`int`: Returns how many unread mentions the user has in this channel.
-
-        .. versionadded:: 2.1
-        """
-        return self.read_state.badge_count
-
-    @property
-    def last_viewed_timestamp(self) -> date:
-        """:class:`datetime.date`: When the channel was last viewed.
-
-        .. versionadded:: 2.1
-        """
-        return self.read_state.last_viewed  # type: ignore
 
     @property
     def category(self) -> Optional[CategoryChannel]:
@@ -669,7 +598,7 @@ class Thread(Messageable, Hashable):
             Whether non-moderators can add other non-moderators to this thread.
             Only available for private threads.
         auto_archive_duration: :class:`int`
-            The new duration in minutes before a thread is automatically hidden from the channel list.
+            The new duration in minutes before a thread is automatically archived for inactivity.
             Must be one of ``60``, ``1440``, ``4320``, or ``10080``.
         slowmode_delay: :class:`int`
             Specifies the slowmode rate limit for user in this thread, in seconds.

@@ -37,7 +37,7 @@ from .asset import Asset
 from .utils import MISSING
 from .user import BaseUser, User, _UserTag
 from .permissions import Permissions
-from .enums import Status, try_enum
+from .enums import RelationshipAction, Status, try_enum
 from .errors import ClientException
 from .colour import Colour
 from .object import Object
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from .guild import Guild
     from .profile import MemberProfile
     from .types.activity import (
-        BasePresenceUpdate,
+        PartialPresenceUpdate,
     )
     from .types.member import (
         MemberWithUser as MemberWithUserPayload,
@@ -77,9 +77,6 @@ if TYPE_CHECKING:
         GuildVoiceState as GuildVoiceStatePayload,
         VoiceState as VoiceStatePayload,
     )
-    from .user import Note
-    from .relationship import Relationship
-    from .calls import PrivateCall
 
     VocalGuildChannel = Union[VoiceChannel, StageChannel]
     ConnectableChannel = Union[VocalGuildChannel, DMChannel, GroupChannel]
@@ -189,7 +186,7 @@ def flatten_user(cls: T) -> T:
 
         # If it's a slotted attribute or a property, redirect it
         # Slotted members are implemented as member_descriptors in Type.__dict__
-        if not hasattr(value, '__annotations__') or isinstance(value, utils.CachedSlotProperty):
+        if not hasattr(value, '__annotations__'):
             getter = attrgetter('_user.' + attr)
             setattr(cls, attr, property(getter, doc=f'Equivalent to :attr:`User.{attr}`'))
         else:
@@ -243,7 +240,7 @@ class Member(discord.abc.Messageable, discord.abc.Connectable, _UserTag):
 
         .. describe:: str(x)
 
-            Returns the member's handle (e.g. ``name`` or ``name#discriminator``).
+            Returns the member's name with the discriminator.
 
     Attributes
     ----------
@@ -253,7 +250,7 @@ class Member(discord.abc.Messageable, discord.abc.Connectable, _UserTag):
     guild: :class:`Guild`
         The guild that the member belongs to.
     nick: Optional[:class:`str`]
-        The guild specific nickname of the user. Takes precedence over the global name.
+        The guild specific nickname of the user.
     pending: :class:`bool`
         Whether the member is pending member verification.
 
@@ -287,24 +284,15 @@ class Member(discord.abc.Messageable, discord.abc.Connectable, _UserTag):
         name: str
         id: int
         discriminator: str
-        global_name: Optional[str]
         bot: bool
         system: bool
         created_at: datetime.datetime
         default_avatar: Asset
         avatar: Optional[Asset]
         avatar_decoration: Optional[Asset]
-        note: Note
-        relationship: Optional[Relationship]
-        is_friend: Callable[[], bool]
-        is_blocked: Callable[[], bool]
         dm_channel: Optional[DMChannel]
-        call: Optional[PrivateCall]
         create_dm: Callable[[], Awaitable[DMChannel]]
-        block: Callable[[], Awaitable[None]]
-        unblock: Callable[[], Awaitable[None]]
-        remove_friend: Callable[[], Awaitable[None]]
-        fetch_mutual_friends: Callable[[], Awaitable[List[User]]]
+        mutual_guilds: List[Guild]
         public_flags: PublicUserFlags
         banner: Optional[Asset]
         accent_color: Optional[Colour]
@@ -329,7 +317,7 @@ class Member(discord.abc.Messageable, discord.abc.Connectable, _UserTag):
 
     def __repr__(self) -> str:
         return (
-            f'<Member id={self._user.id} name={self._user.name!r} global_name={self._user.global_name!r}'
+            f'<Member id={self._user.id} name={self._user.name!r} discriminator={self._user.discriminator!r}'
             f' bot={self._user.bot} nick={self.nick!r} guild={self.guild!r}>'
         )
 
@@ -389,7 +377,7 @@ class Member(discord.abc.Messageable, discord.abc.Connectable, _UserTag):
         self._user = member._user
         return self
 
-    def _update(self, data: Union[GuildMemberUpdateEvent, MemberWithUserPayload]) -> Optional[Member]:
+    def _update(self, data: GuildMemberUpdateEvent) -> Optional[Member]:
         old = Member._copy(self)
 
         # Some changes are optional
@@ -416,7 +404,7 @@ class Member(discord.abc.Messageable, discord.abc.Connectable, _UserTag):
             return old
 
     def _presence_update(
-        self, data: BasePresenceUpdate, user: Union[PartialUserPayload, Tuple[()]]
+        self, data: PartialPresenceUpdate, user: Union[PartialUserPayload, Tuple[()]]
     ) -> Optional[Tuple[User, User]]:
         self._presence = self._state.create_presence(data)
         return self._user._update_self(user)
@@ -538,11 +526,11 @@ class Member(discord.abc.Messageable, discord.abc.Connectable, _UserTag):
     def display_name(self) -> str:
         """:class:`str`: Returns the user's display name.
 
-        For regular users this is just their global name or their username,
-        but if they have a guild specific nickname then that
+        For regular users this is just their username, but
+        if they have a guild specific nickname then that
         is returned instead.
         """
-        return self.nick or self.global_name or self.name
+        return self.nick or self.name
 
     @property
     def display_avatar(self) -> Asset:
@@ -1107,6 +1095,20 @@ class Member(discord.abc.Messageable, discord.abc.Connectable, _UserTag):
         if self.timed_out_until is not None:
             return utils.utcnow() < self.timed_out_until
         return False
+
+    async def send_friend_request(self) -> None:
+        """|coro|
+
+        Sends the member a friend request.
+
+        Raises
+        -------
+        Forbidden
+            Not allowed to send a friend request to the member.
+        HTTPException
+            Sending the friend request failed.
+        """
+        await self._state.http.add_relationship(self._user.id, action=RelationshipAction.send_friend_request)
 
     async def profile(
         self,

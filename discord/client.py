@@ -30,14 +30,11 @@ import logging
 from typing import (
     Any,
     AsyncIterator,
-    Awaitable,
     Callable,
-    Collection,
     Coroutine,
     Dict,
     Generator,
     List,
-    Literal,
     Optional,
     overload,
     Sequence,
@@ -54,7 +51,7 @@ from .user import _UserTag, User, ClientUser, Note
 from .invite import Invite
 from .template import Template
 from .widget import Widget
-from .guild import UserGuild
+from .guild import Guild, UserGuild
 from .emoji import Emoji
 from .channel import _private_channel_factory, _threaded_channel_factory, GroupChannel, PartialMessageable
 from .enums import ActivityType, ChannelType, ClientType, ConnectionType, EntitlementType, Status
@@ -72,13 +69,14 @@ from .utils import MISSING
 from .object import Object, OLDEST_OBJECT
 from .backoff import ExponentialBackoff
 from .webhook import Webhook
-from .application import Application, ApplicationActivityStatistics, Company, EULA, PartialApplication, UnverifiedApplication
+from .application import Application, ApplicationActivityStatistics, Company, EULA, PartialApplication
 from .stage_instance import StageInstance
 from .threads import Thread
 from .sticker import GuildSticker, StandardSticker, StickerPack, _sticker_factory
 from .profile import UserProfile
 from .connections import Connection
 from .team import Team
+from .handlers import CaptchaHandler
 from .billing import PaymentSource, PremiumUsage
 from .subscriptions import Subscription, SubscriptionItem, SubscriptionInvoice
 from .payments import Payment
@@ -87,11 +85,9 @@ from .entitlements import Entitlement, Gift
 from .store import SKU, StoreListing, SubscriptionPlan
 from .guild_premium import *
 from .library import LibraryApplication
-from .relationship import FriendSuggestion, Relationship
+from .relationship import Relationship
 from .settings import UserSettings, LegacyUserSettings, TrackingSettings, EmailSettings
 from .affinity import *
-from .oauth2 import OAuth2Authorization, OAuth2Token
-from .experiment import UserExperiment, GuildExperiment
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -104,13 +100,8 @@ if TYPE_CHECKING:
     from .voice_client import VoiceProtocol
     from .settings import GuildSettings
     from .billing import BillingAddress
-    from .enums import Distributor, OperatingSystem, PaymentGateway, RequiredActionType
+    from .enums import PaymentGateway, RequiredActionType
     from .metadata import MetadataObject
-    from .permissions import Permissions
-    from .read_state import ReadState
-    from .tutorial import Tutorial
-    from .file import File
-    from .guild import Guild
     from .types.snowflake import Snowflake as _Snowflake
 
     PrivateChannel = Union[DMChannel, GroupChannel]
@@ -222,14 +213,10 @@ class Client:
         `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_advanced.html#client-tracing>`_.
 
         .. versionadded:: 2.0
-    captcha_handler: Optional[Callable[[:class:`.CaptchaRequired`, :class:`.Client`], Awaitable[:class:`str`]]
-        A function that solves captcha challenges.
+    captcha_handler: Optional[:class:`CaptchaHandler`]
+        A class that solves captcha challenges.
 
         .. versionadded:: 2.0
-
-        .. versionchanged:: 2.1
-
-            Now accepts a coroutine instead of a ``CaptchaHandler``.
     max_ratelimit_timeout: Optional[:class:`float`]
         The maximum number of seconds to wait when a non-global rate limit is encountered.
         If a request requires sleeping for more than the seconds passed in, then
@@ -255,18 +242,18 @@ class Client:
         proxy_auth: Optional[aiohttp.BasicAuth] = options.pop('proxy_auth', None)
         unsync_clock: bool = options.pop('assume_unsync_clock', True)
         http_trace: Optional[aiohttp.TraceConfig] = options.pop('http_trace', None)
+        captcha_handler: Optional[CaptchaHandler] = options.pop('captcha_handler', None)
+        if captcha_handler is not None and not isinstance(captcha_handler, CaptchaHandler):
+            raise TypeError(f'captcha_handler must derive from CaptchaHandler')
         max_ratelimit_timeout: Optional[float] = options.pop('max_ratelimit_timeout', None)
-        self.captcha_handler: Optional[Callable[[CaptchaRequired, Client], Awaitable[str]]] = options.pop(
-            'captcha_handler', None
-        )
         self.http: HTTPClient = HTTPClient(
+            self.loop,
             proxy=proxy,
             proxy_auth=proxy_auth,
             unsync_clock=unsync_clock,
             http_trace=http_trace,
-            captcha=self.handle_captcha,
+            captcha_handler=captcha_handler,
             max_ratelimit_timeout=max_ratelimit_timeout,
-            locale=lambda: self._connection.locale,
         )
 
         self._handlers: Dict[str, Callable[..., None]] = {
@@ -490,16 +477,12 @@ class Client:
         return self._connection.country_code
 
     @property
-    def preferred_rtc_regions(self) -> List[str]:
+    def preferred_voice_regions(self) -> List[str]:
         """List[:class:`str`]: Geo-ordered list of voice regions the connected client can use.
 
         .. versionadded:: 2.0
-
-        .. versionchanged:: 2.1
-
-            Rename from ``preferred_voice_regions`` to ``preferred_rtc_regions``.
         """
-        return self._connection.preferred_rtc_regions
+        return self._connection.preferred_regions
 
     @property
     def pending_payments(self) -> Sequence[Payment]:
@@ -508,82 +491,6 @@ class Client:
         .. versionadded:: 2.0
         """
         return utils.SequenceProxy(self._connection.pending_payments.values())
-
-    @property
-    def read_states(self) -> List[ReadState]:
-        """List[:class:`.ReadState`]: The read states that the connected client has.
-
-        .. versionadded:: 2.1
-        """
-        return [read_state for group in self._connection._read_states.values() for read_state in group.values()]
-
-    @property
-    def friend_suggestion_count(self) -> int:
-        """:class:`int`: The number of friend suggestions that the connected client has.
-
-        .. versionadded:: 2.1
-        """
-        return self._connection.friend_suggestion_count
-
-    @property
-    def tutorial(self) -> Tutorial:
-        """:class:`.Tutorial`: The tutorial state of the connected client.
-
-        .. versionadded:: 2.1
-        """
-        return self._connection.tutorial
-
-    @property
-    def experiments(self) -> Sequence[UserExperiment]:
-        """Sequence[:class:`.UserExperiment`]: The experiments assignments for the connected client.
-
-        .. versionadded:: 2.1
-        """
-        return utils.SequenceProxy(self._connection.experiments.values())
-
-    @property
-    def guild_experiments(self) -> Sequence[GuildExperiment]:
-        """Sequence[:class:`.GuildExperiment`]: The guild experiments assignments for the connected client.
-
-        .. versionadded:: 2.1
-        """
-        return utils.SequenceProxy(self._connection.guild_experiments.values())
-
-    def get_experiment(self, experiment: Union[str, int], /) -> Optional[Union[UserExperiment, GuildExperiment]]:
-        """Returns a user or guild experiment from the given experiment identifier.
-
-        .. versionadded:: 2.1
-
-        Parameters
-        -----------
-        experiment: Union[:class:`str`, :class:`int`]
-            The experiment name or hash to search for.
-
-        Returns
-        --------
-        Optional[Union[:class:`.UserExperiment`, :class:`.GuildExperiment`]]
-            The experiment, if found.
-        """
-        name = None
-        if not isinstance(experiment, int) and not experiment.isdigit():
-            name = experiment
-            experiment_hash = utils.murmurhash32(experiment, signed=False)
-        else:
-            experiment_hash = int(experiment)
-
-        exp = self._connection.experiments.get(experiment_hash, self._connection.guild_experiments.get(experiment_hash))
-        if exp and not exp.name and name:
-            # Backfill the name
-            exp.name = name
-        return exp
-
-    @property
-    def disclose(self) -> Sequence[str]:
-        """Sequence[:class:`str`]: Upcoming changes to the user's account.
-
-        .. versionadded:: 2.1
-        """
-        return utils.SequenceProxy(self._connection.disclose)
 
     def is_ready(self) -> bool:
         """:class:`bool`: Specifies if the client's internal cache is ready for use."""
@@ -673,7 +580,7 @@ class Client:
         """
         _log.exception('Ignoring exception in %s', event_method)
 
-    async def on_internal_settings_update(self, old_settings: UserSettings, new_settings: UserSettings, /):
+    async def on_internal_settings_update(self, old_settings: UserSettings, new_settings: UserSettings):
         if not self._sync_presences:
             return
 
@@ -717,40 +624,11 @@ class Client:
         """
         pass
 
-    async def handle_captcha(self, exception: CaptchaRequired, /) -> str:
-        """|coro|
-
-        Handles a CAPTCHA challenge and returns a solution.
-
-        The default implementation tries to use the CAPTCHA handler
-        passed in the constructor.
-
-        .. versionadded:: 2.1
-
-        Parameters
-        ------------
-        exception: :class:`.CaptchaRequired`
-            The exception that was raised.
-
-        Raises
-        --------
-        CaptchaRequired
-            The CAPTCHA challenge could not be solved.
-
-        Returns
-        --------
-        :class:`str`
-            The solution to the CAPTCHA challenge.
-        """
-        handler = self.captcha_handler
-        if handler is None:
-            raise exception
-        return await handler(exception, self)
-
     async def _async_setup_hook(self) -> None:
         # Called whenever the client needs to initialise asyncio objects with a running loop
         loop = asyncio.get_running_loop()
         self.loop = loop
+        self.http.loop = loop
         self._connection.loop = loop
         await self._connection.async_setup()
 
@@ -873,6 +751,7 @@ class Client:
                 aiohttp.ClientError,
                 asyncio.TimeoutError,
             ) as exc:
+
                 self.dispatch('disconnect')
                 if not reconnect:
                     await self.close()
@@ -1194,7 +1073,7 @@ class Client:
         if activities is None and not self.is_closed():
             activity = getattr(state.settings, 'custom_activity', None)
             activities = (activity,) if activity else activities
-        return activities or tuple()
+        return activities or ()
 
     @property
     def activity(self) -> Optional[ActivityTypes]:
@@ -1228,7 +1107,7 @@ class Client:
         if activities is None and not self.is_closed():
             activity = getattr(state.settings, 'custom_activity', None)
             activities = (activity,) if activity else activities
-        return activities or tuple()
+        return activities or ()
 
     @property
     def allowed_mentions(self) -> Optional[AllowedMentions]:
@@ -1723,7 +1602,7 @@ class Client:
         if preferred_region is None or channel_id is None:
             region = None
         else:
-            region = str(preferred_region) if preferred_region else state.preferred_rtc_region
+            region = str(preferred_region) if preferred_region else state.preferred_region
 
         await ws.voice_state(None, channel_id, self_mute, self_deaf, self_video, preferred_region=region)
 
@@ -1826,9 +1705,8 @@ class Client:
         :class:`.Guild`
             The guild from the ID.
         """
-        state = self._connection
-        data = await state.http.get_guild(guild_id, with_counts)
-        guild = state.create_guild(data)
+        data = await self.http.get_guild(guild_id, with_counts)
+        guild = Guild(data=data, state=self._connection)
         guild._cs_joined = True
         return guild
 
@@ -1851,9 +1729,8 @@ class Client:
         :class:`.Guild`
             The guild from the ID.
         """
-        state = self._connection
-        data = await state.http.get_guild_preview(guild_id)
-        return state.create_guild(data)
+        data = await self.http.get_guild_preview(guild_id)
+        return Guild(data=data, state=self._connection)
 
     async def create_guild(
         self,
@@ -1897,18 +1774,17 @@ class Client:
             The guild created. This is not the same guild that is
             added to cache.
         """
-        state = self._connection
         if icon is not MISSING:
             icon_base64 = utils._bytes_to_base64_data(icon)
         else:
             icon_base64 = None
 
         if code:
-            data = await state.http.create_from_template(code, name, icon_base64)
+            data = await self.http.create_from_template(code, name, icon_base64)
         else:
-            data = await state.http.create_guild(name, icon_base64)
+            data = await self.http.create_guild(name, icon_base64)
 
-        guild = state.create_guild(data)
+        guild = Guild(data=data, state=self._connection)
         guild._cs_joined = True
         return guild
 
@@ -1938,7 +1814,7 @@ class Client:
         """
         state = self._connection
         data = await state.http.join_guild(guild_id, lurking, state.session_id)
-        guild = state.create_guild(data)
+        guild = Guild(data=data, state=state)
         guild._cs_joined = not lurking
         return guild
 
@@ -2029,6 +1905,7 @@ class Client:
         /,
         *,
         with_counts: bool = True,
+        with_expiration: bool = True,
         scheduled_event_id: Optional[int] = None,
     ) -> Invite:
         """|coro|
@@ -2045,10 +1922,6 @@ class Client:
 
             ``url`` parameter is now positional-only.
 
-        .. versionchanged:: 2.1
-
-            The ``with_expiration`` parameter has been removed.
-
         Parameters
         -----------
         url: Union[:class:`.Invite`, :class:`str`]
@@ -2057,6 +1930,11 @@ class Client:
             Whether to include count information in the invite. This fills the
             :attr:`.Invite.approximate_member_count` and :attr:`.Invite.approximate_presence_count`
             fields.
+        with_expiration: :class:`bool`
+            Whether to include the expiration date of the invite. This fills the
+            :attr:`.Invite.expires_at` field.
+
+            .. versionadded:: 2.0
         scheduled_event_id: Optional[:class:`int`]
             The ID of the scheduled event this invite is for.
 
@@ -2092,6 +1970,7 @@ class Client:
         data = await self.http.get_invite(
             resolved.code,
             with_counts=with_counts,
+            with_expiration=with_expiration,
             guild_scheduled_event_id=scheduled_event_id,
         )
         return Invite.from_incomplete(state=self._connection, data=data)
@@ -2125,6 +2004,7 @@ class Client:
         data = await state.http.get_invite(
             resolved.code,
             with_counts=True,
+            with_expiration=True,
             input_value=resolved.code if isinstance(url, Invite) else url,
         )
         if isinstance(url, Invite):
@@ -2134,16 +2014,15 @@ class Client:
 
         state = self._connection
         type = invite.type
-        kwargs = {}
-        if not invite._message:
+        if message := invite._message:
+            kwargs = {'message': message}
+        else:
             kwargs = {
                 'guild_id': getattr(invite.guild, 'id', MISSING),
                 'channel_id': getattr(invite.channel, 'id', MISSING),
                 'channel_type': getattr(invite.channel, 'type', MISSING),
             }
-        data = await state.http.accept_invite(
-            invite.code, type, state.session_id or utils._generate_session_id(), message=invite._message, **kwargs
-        )
+        data = await state.http.accept_invite(invite.code, type, **kwargs)
         return Invite.from_incomplete(state=state, data=data, message=invite._message)
 
     async def delete_invite(self, invite: Union[Invite, str], /) -> Invite:
@@ -2864,27 +2743,6 @@ class Client:
         data = await state.http.get_relationships()
         return [Relationship(state=state, data=d) for d in data]
 
-    async def friend_suggestions(self) -> List[FriendSuggestion]:
-        """|coro|
-
-        Retrieves all your friend suggestions.
-
-        .. versionadded:: 2.1
-
-        Raises
-        -------
-        HTTPException
-            Retrieving your friend suggestions failed.
-
-        Returns
-        --------
-        List[:class:`.FriendSuggestion`]
-            All your current friend suggestions.
-        """
-        state = self._connection
-        data = await state.http.get_friend_suggestions()
-        return [FriendSuggestion(state=state, data=d) for d in data]
-
     async def fetch_country_code(self) -> str:
         """|coro|
 
@@ -3009,13 +2867,10 @@ class Client:
             # Passing a user object:
             await client.send_friend_request(user)
 
-            # Passing a username
-            await client.send_friend_request('jake')
-
-            # Passing a legacy user:
+            # Passing a stringified user:
             await client.send_friend_request('Jake#0001')
 
-            # Passing a legacy username and discriminator:
+            # Passing a username and discriminator:
             await client.send_friend_request('Jake', '0001')
 
         Parameters
@@ -3042,14 +2897,14 @@ class Client:
             user = args[0]
             if isinstance(user, _UserTag):
                 user = str(user)
-            username, _, discrim = user.partition('#')
+            username, discrim = user.split('#')
         elif len(args) == 2:
             username, discrim = args  # type: ignore
         else:
             raise TypeError(f'send_friend_request() takes 1 or 2 arguments but {len(args)} were given')
 
         state = self._connection
-        await state.http.send_friend_request(username, discrim or 0)
+        await state.http.send_friend_request(username, discrim)
 
     async def applications(self, *, with_team_applications: bool = True) -> List[Application]:
         """|coro|
@@ -3663,7 +3518,7 @@ class Client:
             Whether the previewed subscription should be a renewal.
         code: Optional[:class:`str`]
             Unknown.
-        metadata: Optional[Mapping[:class:`str`, Any]]
+        metadata: Optional[:class:`.Metadata`]
             Extra metadata about the subscription.
         guild: Optional[:class:`.Guild`]
             The guild the previewed subscription's entitlements should be applied to.
@@ -3736,7 +3591,7 @@ class Client:
             The current checkout context.
         code: Optional[:class:`str`]
             Unknown.
-        metadata: Optional[Mapping[:class:`str`, Any]]
+        metadata: Optional[:class:`.Metadata`]
             Extra metadata about the subscription.
         guild: Optional[:class:`.Guild`]
             The guild the subscription's entitlements should be applied to.
@@ -4020,167 +3875,6 @@ class Client:
         state = self._connection
         data = await state.http.get_library_entries(state.country_code or 'US')
         return [LibraryApplication(state=state, data=d) for d in data]
-
-    async def authorizations(self) -> List[OAuth2Token]:
-        """|coro|
-
-        Retrieves the OAuth2 applications authorized on your account.
-
-        .. versionadded:: 2.1
-
-        Raises
-        -------
-        HTTPException
-            Retrieving the authorized applications failed.
-
-        Returns
-        -------
-        List[:class:`.OAuth2Token`]
-            The OAuth2 applications authorized on your account.
-        """
-        state = self._connection
-        data = await state.http.get_oauth2_tokens()
-        return [OAuth2Token(state=state, data=d) for d in data]
-
-    async def fetch_authorization(
-        self,
-        application_id: int,
-        /,
-        *,
-        scopes: Collection[str],
-        response_type: Optional[str] = None,
-        redirect_uri: Optional[str] = None,
-        code_challenge_method: Optional[str] = None,
-        code_challenge: Optional[str] = None,
-        state: Optional[str] = None,
-    ) -> OAuth2Authorization:
-        """|coro|
-
-        Retrieves an OAuth2 authorization for the given application.
-        This provides information about the application before you authorize it.
-
-        .. versionadded:: 2.1
-
-        Parameters
-        -----------
-        application_id: :class:`int`
-            The ID of the application to fetch the authorization for.
-        scopes: List[:class:`str`]
-            The scopes to request for the authorization.
-        response_type: Optional[:class:`str`]
-            The response type that will be used for the authorization, if using the full OAuth2 flow.
-        redirect_uri: Optional[:class:`str`]
-            The redirect URI that will be used for the authorization, if using the full OAuth2 flow.
-            If this isn't provided and ``response_type`` is provided, then the default redirect URI
-            for the application will be provided in the returned authorization.
-        code_challenge_method: Optional[:class:`str`]
-            The code challenge method that will be used for the PKCE authorization, if using the full OAuth2 flow.
-        code_challenge: Optional[:class:`str`]
-            The code challenge that will be used for the PKCE authorization, if using the full OAuth2 flow.
-        state: Optional[:class:`str`]
-            The state that will be used for authorization security.
-
-        Raises
-        -------
-        HTTPException
-            Fetching the authorization failed.
-
-        Returns
-        -------
-        :class:`.OAuth2Authorization`
-            The authorization for the application.
-        """
-        _state = self._connection
-        data = await _state.http.get_oauth2_authorization(
-            application_id,
-            list(scopes),
-            response_type,
-            redirect_uri,
-            code_challenge_method,
-            code_challenge,
-            state,
-        )
-        return OAuth2Authorization(
-            _state=_state,
-            data=data,
-            scopes=list(scopes),
-            response_type=response_type,
-            code_challenge_method=code_challenge_method,
-            code_challenge=code_challenge,
-            state=state,
-        )
-
-    async def create_authorization(
-        self,
-        application_id: int,
-        /,
-        *,
-        scopes: Collection[str],
-        response_type: Optional[str] = None,
-        redirect_uri: Optional[str] = None,
-        code_challenge_method: Optional[str] = None,
-        code_challenge: Optional[str] = None,
-        state: Optional[str] = None,
-        guild: Snowflake = MISSING,
-        channel: Snowflake = MISSING,
-        permissions: Permissions = MISSING,
-    ) -> str:
-        """|coro|
-
-        Creates an OAuth2 authorization for the given application. It is recommended to instead first
-        fetch the authorization information using :meth:`fetch_authorization` and then call :meth:`.OAuth2Authorization.authorize`.
-
-        .. versionadded:: 2.1
-
-        Parameters
-        -----------
-        application_id: :class:`int`
-            The ID of the application to create the authorization for.
-        scopes: List[:class:`str`]
-            The scopes to request for the authorization.
-        response_type: Optional[:class:`str`]
-            The response type to use for the authorization, if using the full OAuth2 flow.
-        redirect_uri: Optional[:class:`str`]
-            The redirect URI to use for the authorization, if using the full OAuth2 flow.
-            If this isn't provided and ``response_type`` is provided, then the default redirect URI
-            for the application will be used.
-        code_challenge_method: Optional[:class:`str`]
-            The code challenge method to use for the PKCE authorization, if using the full OAuth2 flow.
-        code_challenge: Optional[:class:`str`]
-            The code challenge to use for the PKCE authorization, if using the full OAuth2 flow.
-        state: Optional[:class:`str`]
-            The state to use for authorization security.
-        guild: :class:`.Guild`
-            The guild to authorize for, if authorizing with the ``applications.commands`` or ``bot`` scopes.
-        channel: Union[:class:`.TextChannel`, :class:`.VoiceChannel`, :class:`.StageChannel`]
-            The channel to authorize for, if authorizing with the ``webhooks.incoming`` scope. See :meth:`.Guild.webhook_channels`.
-        permissions: :class:`.Permissions`
-            The permissions to grant, if authorizing with the ``bot`` scope.
-
-        Raises
-        -------
-        HTTPException
-            Creating the authorization failed.
-
-        Returns
-        -------
-        :class:`str`
-            The URL to redirect the user to for authorization.
-        """
-        _state = self._connection
-        data = await _state.http.authorize_oauth2(
-            application_id,
-            list(scopes),
-            response_type,
-            redirect_uri,
-            code_challenge_method,
-            code_challenge,
-            state,
-            guild_id=guild.id if guild else None,
-            webhook_channel_id=channel.id if channel else None,
-            permissions=permissions.value if permissions else None,
-        )
-        return data['location']
 
     async def entitlements(
         self, *, with_sku: bool = True, with_application: bool = True, entitlement_type: Optional[EntitlementType] = None
@@ -4978,273 +4672,3 @@ class Client:
             Leaving the active developer program failed.
         """
         await self._connection.http.unenroll_active_developer()
-
-    async def report_unverified_application(
-        self,
-        name: str,
-        *,
-        icon: File,
-        os: OperatingSystem,
-        executable: str = MISSING,
-        publisher: str = MISSING,
-        distributor: Distributor = MISSING,
-        sku: str = MISSING,
-    ) -> UnverifiedApplication:
-        """|coro|
-
-        Reports an unverified application (a game not detected by the Discord client) to Discord.
-
-        If missing, this also uploads the application icon to Discord.
-
-        .. versionadded:: 2.1
-
-        Parameters
-        -----------
-        name: :class:`str`
-            The name of the application.
-        icon: :class:`.File`
-            The icon of the application.
-        os: :class:`.OperatingSystem`
-            The operating system the application is found on.
-        executable: :class:`str`
-            The executable of the application.
-        publisher: :class:`str`
-            The publisher of the application.
-        distributor: :class:`.Distributor`
-            The distributor of the application SKU.
-        sku: :class:`str`
-            The SKU of the application.
-
-        Raises
-        -------
-        HTTPException
-            Reporting the unverified application failed.
-
-        Returns
-        -------
-        :class:`.UnverifiedApplication`
-            The reported unverified application.
-        """
-        state = self._connection
-        data = await state.http.report_unverified_application(
-            name=name,
-            icon_hash=icon.md5.hexdigest(),
-            os=str(os),
-            executable=executable,
-            publisher=publisher,
-            distributor=str(distributor) if distributor else None,
-            sku=sku,
-        )
-
-        app = UnverifiedApplication(data=data)
-        if 'icon' in app.missing_data:
-            icon_data = utils._bytes_to_base64_data(icon.fp.read())
-            await state.http.upload_unverified_application_icon(app.name, app.hash, icon_data)
-        return app
-
-    @overload
-    async def fetch_experiments(
-        self, with_guild_experiments: Literal[True] = ...
-    ) -> List[Union[UserExperiment, GuildExperiment]]:
-        ...
-
-    @overload
-    async def fetch_experiments(self, with_guild_experiments: Literal[False] = ...) -> List[UserExperiment]:
-        ...
-
-    @overload
-    async def fetch_experiments(
-        self, with_guild_experiments: bool = True
-    ) -> Union[List[UserExperiment], List[Union[UserExperiment, GuildExperiment]]]:
-        ...
-
-    async def fetch_experiments(
-        self, with_guild_experiments: bool = True
-    ) -> Union[List[UserExperiment], List[Union[UserExperiment, GuildExperiment]]]:
-        """|coro|
-
-        Retrieves the experiment rollouts available in relation to the user.
-
-        .. versionadded:: 2.1
-
-        .. note::
-
-            Certain guild experiments are only available via the gateway.
-            See :attr:`guild_experiments` for these.
-
-        Parameters
-        -----------
-        with_guild_experiments: :class:`bool`
-            Whether to include guild experiment rollouts in the response.
-
-        Raises
-        -------
-        HTTPException
-            Retrieving the experiment assignments failed.
-
-        Returns
-        -------
-        List[Union[:class:`.UserExperiment`, :class:`.GuildExperiment`]]
-            The experiment rollouts.
-        """
-        state = self._connection
-        data = await state.http.get_experiments(with_guild_experiments=with_guild_experiments)
-
-        experiments: List[Union[UserExperiment, GuildExperiment]] = [
-            UserExperiment(state=state, data=exp) for exp in data['assignments']
-        ]
-        for exp in data.get('guild_experiments', []):
-            experiments.append(GuildExperiment(state=state, data=exp))
-
-        return experiments
-
-    async def join_hub_waitlist(self, email: str, school: str) -> None:
-        """|coro|
-
-        Signs up for the Discord Student Hub waitlist.
-
-        .. versionadded:: 2.1
-
-        Parameters
-        -----------
-        email: :class:`str`
-            The email to sign up with.
-        school: :class:`str`
-            The school name to sign up with.
-
-        Raises
-        -------
-        HTTPException
-            Signing up for the waitlist failed.
-        """
-        await self._connection.http.hub_waitlist_signup(email, school)
-
-    async def lookup_hubs(self, email: str, /) -> List[Guild]:
-        """|coro|
-
-        Looks up the Discord Student Hubs for the given email.
-
-        .. note::
-
-            Using this, you will only receive
-            :attr:`.Guild.id`, :attr:`.Guild.name`, and :attr:`.Guild.icon` per guild.
-
-        .. versionadded:: 2.1
-
-        Parameters
-        -----------
-        email: :class:`str`
-            The email to look up.
-
-        Raises
-        -------
-        HTTPException
-            Looking up the hubs failed.
-
-        Returns
-        --------
-        List[:class:`.Guild`]
-            The hubs found.
-        """
-        state = self._connection
-        data = await state.http.hub_lookup(email)
-        return [state.create_guild(d) for d in data.get('guilds_info', [])]  # type: ignore
-
-    @overload
-    async def join_hub(self, guild: Snowflake, email: str, *, code: None = ...) -> None:
-        ...
-
-    @overload
-    async def join_hub(self, guild: Snowflake, email: str, *, code: str = ...) -> Guild:
-        ...
-
-    async def join_hub(self, guild: Snowflake, email: str, *, code: Optional[str] = None) -> Optional[Guild]:
-        """|coro|
-
-        Joins the user to or requests a verification code for a Student Hub.
-
-        .. versionadded:: 2.1
-
-        Parameters
-        ----------
-        guild: :class:`.Guild`
-            The hub to join.
-        email: :class:`str`
-            The email to join with.
-        code: Optional[:class:`str`]
-            The email verification code.
-
-            .. note::
-
-                If not provided, this method requests a verification code instead.
-
-        Raises
-        ------
-        HTTPException
-            Joining the hub or requesting the verification code failed.
-        """
-        state = self._connection
-
-        if not code:
-            data = await state.http.hub_lookup(email, guild.id)
-            if not data.get('has_matching_guild'):
-                raise ValueError('Guild does not match email')
-            return
-
-        data = await state.http.join_hub(email, guild.id, code)
-        return state.create_guild(data['guild'])
-
-    async def pomelo_suggestion(self) -> str:
-        """|coro|
-
-        Gets the suggested pomelo username for your account.
-        This username can be used with :meth:`~discord.ClientUser.edit` to migrate your account
-        to Discord's `new unique username system <https://discord.com/blog/usernames>`_
-
-        .. note::
-
-            This method requires you to be in the pomelo rollout.
-
-        .. versionadded:: 2.1
-
-        Raises
-        -------
-        HTTPException
-            You are not in the pomelo rollout.
-
-        Returns
-        --------
-        :class:`str`
-            The suggested username.
-        """
-        data = await self.http.pomelo_suggestion()
-        return data['username']
-
-    async def check_pomelo_username(self, username: str) -> bool:
-        """|coro|
-
-        Checks if a pomelo username is taken.
-
-        .. note::
-
-            This method requires you to be in the pomelo rollout.
-
-        .. versionadded:: 2.1
-
-        Parameters
-        -----------
-        username: :class:`str`
-            The username to check.
-
-        Raises
-        -------
-        HTTPException
-            You are not in the pomelo rollout.
-
-        Returns
-        --------
-        :class:`bool`
-            Whether the username is taken.
-        """
-        data = await self.http.pomelo_attempt(username)
-        return data['taken']
